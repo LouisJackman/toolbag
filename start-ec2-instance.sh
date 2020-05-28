@@ -9,11 +9,22 @@
 set -o errexit
 set -o nounset
 
-readonly name="$1"
+name="$1"
 shift
 
-readonly region="$2"
-shift
+if [ 0 -lt "$#" ]
+then
+    region="$1"
+    shift
+else
+    region=
+fi
+
+if ! command -v jq
+then
+    echo jq is missing >&2
+    exit 1
+fi
 
 start_ec2_instance() {
     local name="$1"
@@ -25,7 +36,7 @@ start_ec2_instance() {
     local region_arg
     if [ -n "$region" ]
     then
-        region_arg="--region '$region'"
+        region_arg="--region $region"
     fi
 
     local instance_id="$(aws $region_arg --output json ec2 describe-instances \
