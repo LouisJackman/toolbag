@@ -33,7 +33,7 @@ start_ec2_instance() {
     local region="$1"
     shift
 
-    local region_arg
+    local region_arg=
     if [ -n "$region" ]
     then
         region_arg="--region $region"
