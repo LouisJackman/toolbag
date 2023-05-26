@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+
+"""
+Start EC2 instances based on their `Name` tags.
+"""
+
+from argparse import ArgumentParser
+from inspect import getdoc
+import json
+from subprocess import check_output
+from sys import modules
+
+
+parser = ArgumentParser(description=getdoc(modules[__name__]))
+parser.add_argument("name", help="The name of the EC2 instances.")
+parser.add_argument(
+    "region",
+    nargs="?",
+    help="The AWS region of the instances.",
+)
+args = parser.parse_args()
+
+region_arg = ["--region", args.region] if args.region else []
+
+
+def aws(*args):
+    return check_output(["aws", *region_arg, *args])
+
+
+response = aws(
+    "--output",
+    "json",
+    "ec2",
+    "describe-instances",
+    "--filters",
+    f"Name=tag:Name,Values={args.name}",
+    "--query",
+    "Reservations[*].Instances[*].InstanceId",
+)
+ids = (x[0] for x in json.loads(response))
+aws("ec2", "start-instances", "--instance_ids", *ids)

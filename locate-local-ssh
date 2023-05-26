@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+
+"""
+Locate SSH servers on the local network via `nmap`.
+"""
+
+from argparse import ArgumentParser
+from inspect import getdoc
+import re
+import subprocess
+from sys import modules
+
+
+DELIMITER = "Nmap scan report for "
+
+parser = ArgumentParser(description=getdoc(modules[__name__]))
+parser.add_argument(
+    "local-network-range",
+    type=int,
+    nargs="?",
+    default=0,
+    help="The 3rd octet to specify in the class C IPv4 range.",
+)
+args = parser.parse_args()
+
+local_net_range = getattr(args, "local-network-range")
+ip = f"192.168.{local_net_range}.1-255"
+
+out = subprocess.check_output(["nmap", "-n", "-p", "22", ip]).decode()
+m = re.compile(r"22/tcp open", re.IGNORECASE)
+for s in out.split(DELIMITER):
+    if m.match(s):
+        print(s)
+        break

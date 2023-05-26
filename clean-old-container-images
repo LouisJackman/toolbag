@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+
+"""
+For all images with a semantic version tag (e.g. 0.0.1), delete all but the
+latest for each unique image name.
+"""
+
+from argparse import ArgumentParser
+from collections import defaultdict
+from inspect import getdoc
+import re
+from subprocess import SubprocessError, PIPE, Popen, run
+from sys import modules
+
+from utils import SemanticVersion
+
+
+ArgumentParser(description=getdoc(modules[__name__])).parse_args()
+
+version_pattern = re.compile(r"^ (\d+) \. (\d+) \. (\d+) $", re.VERBOSE)
+
+
+def extract_outdated_images(stdout):
+    records = defaultdict(set)
+
+    def record(name, tag):
+        if match := version_pattern.match(tag):
+            version = SemanticVersion(*(int(x) for x in match.groups()))
+            records[name].add(version)
+
+    for raw in stdout:
+        name, tag, *_ = raw.decode().split()
+        record(name, tag)
+
+    for name, versions in records.items():
+        highest = max(versions)
+        versions.remove(highest)
+
+    return records
+
+
+def delete_images(images):
+    def gen():
+        for name, versions in images.items():
+            for version in versions:
+                yield f"{name}:{version}"
+
+    individual_images = list(gen())
+    if individual_images:
+        run(["docker", "rmi", *individual_images], check=True)
+
+
+with Popen(["docker", "images"], stdout=PIPE) as proc:
+    if proc.stdout:
+        outdated = extract_outdated_images(proc.stdout)
+        delete_images(outdated)
+    if proc.wait() != 0:
+        raise SubprocessError()

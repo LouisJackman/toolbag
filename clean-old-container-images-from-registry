@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+
+"""
+For all images with a semantic version tag (e.g. 0.0.1), delete all but the
+latest for each unique image name from a registry.
+"""
+
+from argparse import ArgumentParser
+from inspect import getdoc
+from itertools import islice
+import re
+from subprocess import SubprocessError, PIPE, Popen, run
+from sys import modules
+
+from utils import SemanticVersion
+
+
+parser = ArgumentParser(description=getdoc(modules[__name__]))
+parser.add_argument(
+    "registry",
+    nargs="?",
+    help="The registry to clean.",
+    default="localhost:5000",
+)
+args = parser.parse_args()
+
+registry = args.registry
+bypass_tls = (
+    registry.startswith("localhost")
+    or registry.startswith("127.0.0.1")
+    or registry.startswith("[::1]")
+)
+tls_args = ["-f", "-k"] if bypass_tls else []
+
+
+def delete_from_registry(image):
+    return run(["reg", "rm", "-f", "-k", f"{registry}/{image}"], check=True)
+
+
+version_pattern = re.compile(r"^ (\d+) \. (\d+) \. (\d+) ,? $", re.VERBOSE)
+
+
+def parse_versions(fields):
+    def gen():
+        for field in fields:
+            if match := version_pattern.match(field):
+                yield SemanticVersion(*(int(x) for x in match.groups()))
+
+    return set(gen())
+
+
+def extract_outdated_images(line):
+    image, *fields = line.split()
+    versions = parse_versions(fields)
+    highest = max(versions)
+    versions.remove(highest)
+    for version in versions:
+        yield f"{image}:{version}"
+
+
+with Popen(["reg", "ls"] + tls_args + [registry], stdout=PIPE) as proc:
+    if proc.stdout:
+        lines = islice((line for line in proc.stdout), 2, None)
+        for raw in lines:
+            line = raw.decode()
+            images = extract_outdated_images(line)
+            for image in images:
+                print(f"Deleting {image} from registry {registry}...")
+                # delete_from_registry(image)
+    if proc.wait() != 0:
+        raise SubprocessError()
