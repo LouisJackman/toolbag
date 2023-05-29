@@ -1,5 +1,6 @@
 from functools import total_ordering
 from typing import NamedTuple
+from subprocess import run
 
 
 @total_ordering
@@ -15,3 +16,7 @@ class SemanticVersion(NamedTuple):
 
     def __str__(self):
         return f"{self.major}.{self.minor}.{self.patch}"
+
+
+def docker(*args, **kwargs):
+    return run(["docker", *args], check=True, **kwargs)

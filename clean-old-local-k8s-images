@@ -11,12 +11,15 @@ from argparse import ArgumentParser
 from inspect import getdoc
 from subprocess import SubprocessError, Popen, PIPE, run
 from sys import modules
+from typing import Iterable
+
+from utils import docker
 
 
 ArgumentParser(description=getdoc(modules[__name__])).parse_args()
 
 
-def parse_output(out):
+def parse_output(out: Iterable[bytes]) -> Iterable[str]:
     for raw in out:
         line = raw.decode()
         if ("k8s" in line) or ("kube-" in line):
@@ -25,8 +28,10 @@ def parse_output(out):
 
 
 with Popen(["docker", "images"], stdout=PIPE) as proc:
+    if not proc.stdout:
+        raise RuntimeError("missing expected output from `docker images`")
     images = list(parse_output(proc.stdout))
     if proc.wait() != 0:
         raise SubprocessError()
 if images:
-    run(["docker", "rmi", *images], check=True)
+    docker("rmi", *images)

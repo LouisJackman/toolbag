@@ -23,7 +23,7 @@ args = parser.parse_args()
 region_arg = ["--region", args.region] if args.region else []
 
 
-def aws(*args):
+def aws(*args: str) -> bytes:
     return check_output(["aws", *region_arg, *args])
 
 

@@ -11,6 +11,7 @@ from itertools import islice
 import re
 from subprocess import SubprocessError, PIPE, Popen, run
 from sys import modules
+from typing import Iterable
 
 from utils import SemanticVersion
 
@@ -24,32 +25,35 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-registry = args.registry
+REGISTRY = args.registry
 bypass_tls = (
-    registry.startswith("localhost")
-    or registry.startswith("127.0.0.1")
-    or registry.startswith("[::1]")
+    REGISTRY.startswith("localhost")
+    or REGISTRY.startswith("127.0.0.1")
+    or REGISTRY.startswith("[::1]")
 )
-tls_args = ["-f", "-k"] if bypass_tls else []
+TLS_ARGS = ["-f", "-k"] if bypass_tls else []
+del bypass_tls
+
+del args
 
 
-def delete_from_registry(image):
-    return run(["reg", "rm", "-f", "-k", f"{registry}/{image}"], check=True)
+def delete_from_registry(image: str) -> None:
+    run(["reg", "rm", "-f", "-k", f"{REGISTRY}/{image}"], check=True)
 
 
-version_pattern = re.compile(r"^ (\d+) \. (\d+) \. (\d+) ,? $", re.VERBOSE)
+VERSION_PATTERN = re.compile(r"^ (\d+) \. (\d+) \. (\d+) ,? $", re.VERBOSE)
 
 
-def parse_versions(fields):
+def parse_versions(fields: Iterable[str]) -> set[SemanticVersion]:
     def gen():
         for field in fields:
-            if match := version_pattern.match(field):
+            if match := VERSION_PATTERN.match(field):
                 yield SemanticVersion(*(int(x) for x in match.groups()))
 
     return set(gen())
 
 
-def extract_outdated_images(line):
+def extract_outdated_images(line: str) -> Iterable[str]:
     image, *fields = line.split()
     versions = parse_versions(fields)
     highest = max(versions)
@@ -58,14 +62,13 @@ def extract_outdated_images(line):
         yield f"{image}:{version}"
 
 
-with Popen(["reg", "ls"] + tls_args + [registry], stdout=PIPE) as proc:
+with Popen(["reg", "ls"] + TLS_ARGS + [REGISTRY], stdout=PIPE) as proc:
     if proc.stdout:
         lines = islice((line for line in proc.stdout), 2, None)
         for raw in lines:
             line = raw.decode()
             images = extract_outdated_images(line)
             for image in images:
-                print(f"Deleting {image} from registry {registry}...")
-                # delete_from_registry(image)
+                delete_from_registry(image)
     if proc.wait() != 0:
         raise SubprocessError()

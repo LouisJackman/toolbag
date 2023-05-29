@@ -11,20 +11,21 @@ from inspect import getdoc
 import re
 from subprocess import SubprocessError, PIPE, Popen, run
 from sys import modules
+from typing import Iterable, Mapping
 
-from utils import SemanticVersion
+from utils import SemanticVersion, docker
 
 
 ArgumentParser(description=getdoc(modules[__name__])).parse_args()
 
-version_pattern = re.compile(r"^ (\d+) \. (\d+) \. (\d+) $", re.VERBOSE)
+VERSION_PATTERN = re.compile(r"^ (\d+) \. (\d+) \. (\d+) $", re.VERBOSE)
 
 
-def extract_outdated_images(stdout):
+def extract_outdated_images(stdout: Iterable[bytes]) -> Mapping[str, set[SemanticVersion]]:
     records = defaultdict(set)
 
-    def record(name, tag):
-        if match := version_pattern.match(tag):
+    def record(name: str, tag: str) -> None:
+        if match := VERSION_PATTERN.match(tag):
             version = SemanticVersion(*(int(x) for x in match.groups()))
             records[name].add(version)
 
@@ -39,7 +40,7 @@ def extract_outdated_images(stdout):
     return records
 
 
-def delete_images(images):
+def delete_images(images: Mapping[str, set[SemanticVersion]]) -> None:
     def gen():
         for name, versions in images.items():
             for version in versions:
@@ -47,7 +48,7 @@ def delete_images(images):
 
     individual_images = list(gen())
     if individual_images:
-        run(["docker", "rmi", *individual_images], check=True)
+        docker("rmi", *individual_images)
 
 
 with Popen(["docker", "images"], stdout=PIPE) as proc:
