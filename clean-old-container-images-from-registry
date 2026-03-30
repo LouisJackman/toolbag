@@ -38,7 +38,7 @@ del args
 
 
 def delete_from_registry(image: str) -> None:
-    run(["reg", "rm", "-f", "-k", f"{REGISTRY}/{image}"], check=True)
+    run(["reg", "rm"] + TLS_ARGS + [f"{REGISTRY}/{image}"], check=True)
 
 
 VERSION_PATTERN = re.compile(r"^ (\d+) \. (\d+) \. (\d+) ,? $", re.VERBOSE)
