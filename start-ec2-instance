@@ -38,4 +38,4 @@ response = aws(
     "Reservations[*].Instances[*].InstanceId",
 )
 ids = (x[0] for x in json.loads(response))
-aws("ec2", "start-instances", "--instance_ids", *ids)
+aws("ec2", "start-instances", "--instance-ids", *ids)
