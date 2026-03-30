@@ -9,7 +9,7 @@ so won't be deleted by Docker.
 
 from argparse import ArgumentParser
 from inspect import getdoc
-from subprocess import SubprocessError, Popen, PIPE, run
+from subprocess import SubprocessError, Popen, PIPE
 from sys import modules
 from typing import Iterable
 
