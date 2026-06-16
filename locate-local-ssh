@@ -29,6 +29,6 @@ ip = f"192.168.{local_net_range}.1-255"
 out = subprocess.check_output(["nmap", "-n", "-p", "22", ip]).decode()
 m = re.compile(r"22/tcp open", re.IGNORECASE)
 for s in out.split(DELIMITER):
-    if m.match(s):
-        print(s)
-        break
+    if m.search(s):
+        host, *_ = s.splitlines()
+        print(host)
