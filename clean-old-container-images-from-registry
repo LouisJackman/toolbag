@@ -3,13 +3,16 @@
 """
 For all images with a semantic version tag (e.g. 0.0.1), delete all but the
 latest for each unique image name from a registry.
+
+``crane`` (google/go-containerregistry) enumerates the repositories in a registry
+(``crane catalog``), lists their tags (``crane ls``), and deletes them
+(``crane delete``).
 """
 
 from argparse import ArgumentParser
 from inspect import getdoc
-from itertools import islice
 import re
-from subprocess import SubprocessError, PIPE, Popen, run
+from subprocess import run
 from sys import modules
 from typing import Iterable
 
@@ -25,52 +28,42 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-REGISTRY = args.registry
+REGISTRY: str = args.registry
 bypass_tls = (
     REGISTRY.startswith("localhost")
     or REGISTRY.startswith("127.0.0.1")
     or REGISTRY.startswith("[::1]")
 )
-TLS_ARGS = ["-f", "-k"] if bypass_tls else []
+# crane's global --insecure skips TLS verification for local registries.
+CRANE = ["crane", "--insecure"] if bypass_tls else ["crane"]
 del bypass_tls
-
 del args
 
-
-def delete_from_registry(image: str) -> None:
-    run(["reg", "rm"] + TLS_ARGS + [f"{REGISTRY}/{image}"], check=True)
+VERSION_PATTERN = re.compile(r"^ (\d+) \. (\d+) \. (\d+) $", re.VERBOSE)
 
 
-VERSION_PATTERN = re.compile(r"^ (\d+) \. (\d+) \. (\d+) ,? $", re.VERBOSE)
+def crane(*arguments: str) -> list[str]:
+    """Run ``crane arguments...`` and return its output split into fields."""
+    completed = run(CRANE + list(arguments), check=True, capture_output=True, text=True)
+    return completed.stdout.split()
 
 
-def parse_versions(fields: Iterable[str]) -> set[SemanticVersion]:
-    def gen():
-        for field in fields:
-            if match := VERSION_PATTERN.match(field):
-                yield SemanticVersion(*(int(x) for x in match.groups()))
+def parse_versions(tags: Iterable[str]) -> set[SemanticVersion]:
+    return {
+        SemanticVersion(*(int(x) for x in match.groups()))
+        for tag in tags
+        if (match := VERSION_PATTERN.match(tag))
+    }
 
-    return set(gen())
 
-
-def extract_outdated_images(line: str) -> Iterable[str]:
-    image, *fields = line.split()
-    versions = parse_versions(fields)
-    if not versions:
+def delete_old_tags(repository: str) -> None:
+    tags = crane("ls", f"{REGISTRY}/{repository}")
+    versions = parse_versions(tags)
+    if len(versions) < 2:
         return
-    highest = max(versions)
-    versions.remove(highest)
-    for version in versions:
-        yield f"{image}:{version}"
+    for version in versions - {max(versions)}:
+        run(CRANE + ["delete", f"{REGISTRY}/{repository}:{version}"], check=True)
 
 
-with Popen(["reg", "ls"] + TLS_ARGS + [REGISTRY], stdout=PIPE) as proc:
-    if proc.stdout:
-        lines = islice((line for line in proc.stdout), 2, None)
-        for raw in lines:
-            line = raw.decode()
-            images = extract_outdated_images(line)
-            for image in images:
-                delete_from_registry(image)
-    if proc.wait() != 0:
-        raise SubprocessError()
+for repository in crane("catalog", REGISTRY):
+    delete_old_tags(repository)

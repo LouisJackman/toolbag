@@ -35,8 +35,8 @@ uv tool run mypy --strict .
 
 Two shared constructs used across scripts:
 
-- **`SemanticVersion`** — A `NamedTuple` (`major`, `minor`, `patch`) with a `parse(tag)` classmethod that parses Docker image tags (e.g. `my-image:1.2.3` → `SemanticVersion(1, 2, 3)`). Used to identify and compare versioned container images.
-- **`docker()`** — Thin subprocess wrapper around the `docker` CLI that returns decoded stdout. Used by container management scripts.
+- **`SemanticVersion`** — A `NamedTuple` (`major`, `minor`, `patch`) that parses Docker image tags (e.g. `my-image:1.2.3` → `SemanticVersion(1, 2, 3)`). It relies on the tuple ordering inherited from `NamedTuple`, so versions sort and compare directly. Used to identify and compare versioned container images.
+- **`container_runtime()` / `container()`** — `container_runtime()` resolves the container CLI (`$CONTAINER_RUNTIME`, then `podman`, then `docker`); `container()` runs a subprocess through it and returns the completed process. Used by container management scripts.
 
 ### Script Patterns
 
@@ -49,9 +49,9 @@ Each script follows the same structure:
 
 | Script | Requires |
 |---|---|
-| `clean-old-container-images` | `docker` |
-| `clean-old-container-images-from-registry` | `docker`, `reg` |
-| `clean-old-local-k8s-images` | `docker` |
+| `clean-old-container-images` | `podman` or `docker` |
+| `clean-old-container-images-from-registry` | `crane` |
+| `clean-old-local-k8s-images` | Docker (Docker Desktop) |
 | `get-temperature` | Linux `/sys/class/thermal/` (Linux only) |
 | `locate-local-ssh` | `nmap` |
 | `start-ec2-instance` | `aws` CLI |

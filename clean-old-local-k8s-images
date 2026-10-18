@@ -13,7 +13,7 @@ from subprocess import SubprocessError, Popen, PIPE
 from sys import modules
 from typing import Iterable
 
-from utils import docker
+from utils import container, container_runtime
 
 
 ArgumentParser(description=getdoc(modules[__name__])).parse_args()
@@ -27,11 +27,22 @@ def parse_output(out: Iterable[bytes]) -> Iterable[str]:
             yield f"{name}:{tag}"
 
 
-with Popen(["docker", "images"], stdout=PIPE) as proc:
+# This targets Docker Desktop's bundled Kubernetes, which Podman does not
+# provide; a Podman context cannot clean images it never created.
+if container_runtime() != "docker":
+    raise SystemExit(
+        "clean-old-local-k8s-images targets Docker Desktop's local Kubernetes; "
+        "set CONTAINER_RUNTIME=docker on a host that provides it"
+    )
+
+with Popen(
+    [container_runtime(), "images", "--format", "{{.Repository}} {{.Tag}}"],
+    stdout=PIPE,
+) as proc:
     if not proc.stdout:
-        raise RuntimeError("missing expected output from `docker images`")
+        raise RuntimeError("missing expected output from the container runtime")
     images = list(parse_output(proc.stdout))
     if proc.wait() != 0:
         raise SubprocessError()
 if images:
-    docker("rmi", *images)
+    container("rmi", *images)

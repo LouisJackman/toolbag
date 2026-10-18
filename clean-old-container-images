@@ -6,14 +6,14 @@ latest for each unique image name.
 """
 
 from argparse import ArgumentParser
-from collections import defaultdict
 from inspect import getdoc
+from itertools import groupby
 import re
 from subprocess import SubprocessError, PIPE, Popen
 from sys import modules
 from typing import Iterable, Mapping
 
-from utils import SemanticVersion, docker
+from utils import SemanticVersion, container, container_runtime
 
 
 ArgumentParser(description=getdoc(modules[__name__])).parse_args()
@@ -21,37 +21,37 @@ ArgumentParser(description=getdoc(modules[__name__])).parse_args()
 VERSION_PATTERN = re.compile(r"^ (\d+) \. (\d+) \. (\d+) $", re.VERBOSE)
 
 
+def tagged_version(line: str) -> Iterable[tuple[str, SemanticVersion]]:
+    """Yield ``(name, version)`` when the line's tag parses as a version."""
+    name, tag, *_ = line.split()
+    if match := VERSION_PATTERN.match(tag):
+        yield name, SemanticVersion(*(int(x) for x in match.groups()))
+
+
 def extract_outdated_images(stdout: Iterable[bytes]) -> Mapping[str, set[SemanticVersion]]:
-    records = defaultdict(set)
-
-    def record(name: str, tag: str) -> None:
-        if match := VERSION_PATTERN.match(tag):
-            version = SemanticVersion(*(int(x) for x in match.groups()))
-            records[name].add(version)
-
-    for raw in stdout:
-        name, tag, *_ = raw.decode().split()
-        record(name, tag)
-
-    for name, versions in records.items():
-        highest = max(versions)
-        versions.remove(highest)
-
-    return records
+    tagged = sorted(entry for raw in stdout for entry in tagged_version(raw.decode()))
+    versions_by_name = {
+        name: {version for _, version in group}
+        for name, group in groupby(tagged, key=lambda pair: pair[0])
+    }
+    return {
+        name: versions - {max(versions)}
+        for name, versions in versions_by_name.items()
+    }
 
 
 def delete_images(images: Mapping[str, set[SemanticVersion]]) -> None:
-    def gen():
-        for name, versions in images.items():
-            for version in versions:
-                yield f"{name}:{version}"
-
-    individual_images = list(gen())
+    individual_images = [
+        f"{name}:{version}" for name, versions in images.items() for version in versions
+    ]
     if individual_images:
-        docker("rmi", *individual_images)
+        container("rmi", *individual_images)
 
 
-with Popen(["docker", "images"], stdout=PIPE) as proc:
+with Popen(
+    [container_runtime(), "images", "--format", "{{.Repository}} {{.Tag}}"],
+    stdout=PIPE,
+) as proc:
     if proc.stdout:
         outdated = extract_outdated_images(proc.stdout)
         delete_images(outdated)
