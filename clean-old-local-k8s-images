@@ -28,15 +28,17 @@ def parse_output(out: Iterable[bytes]) -> Iterable[str]:
 
 
 # This targets Docker Desktop's bundled Kubernetes, which Podman does not
-# provide; a Podman context cannot clean images it never created.
-if container_runtime() != "docker":
+# provide; a Podman context cannot clean images it never created. Podman is
+# tried first, so a host with both runtimes must select Docker explicitly.
+runtime = container_runtime()
+if runtime != "docker":
     raise SystemExit(
         "clean-old-local-k8s-images targets Docker Desktop's local Kubernetes; "
-        "set CONTAINER_RUNTIME=docker on a host that provides it"
+        "set CONTAINER_ENGINE=docker on a host that provides it"
     )
 
 with Popen(
-    [container_runtime(), "images", "--format", "{{.Repository}} {{.Tag}}"],
+    [runtime, "images", "--format", "{{.Repository}} {{.Tag}}"],
     stdout=PIPE,
 ) as proc:
     if not proc.stdout:

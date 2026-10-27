@@ -16,14 +16,16 @@ class SemanticVersion(NamedTuple):
 
 @cache
 def container_runtime() -> str:
-    """The container CLI to use: $CONTAINER_RUNTIME, else podman, else docker."""
-    if explicit := os.environ.get("CONTAINER_RUNTIME"):
-        return explicit
+    """The container CLI: $CONTAINER_ENGINE, then podman, then docker."""
+    if explicit := os.environ.get("CONTAINER_ENGINE"):
+        if shutil.which(explicit):
+            return explicit
+        raise RuntimeError(f"CONTAINER_ENGINE is not executable: {explicit}")
     for candidate in ("podman", "docker"):
         if shutil.which(candidate):
             return candidate
     raise RuntimeError(
-        "no container runtime found (podman or docker); set CONTAINER_RUNTIME"
+        "no container runtime found; install podman or docker, or set CONTAINER_ENGINE"
     )
 
 

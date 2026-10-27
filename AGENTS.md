@@ -1,9 +1,10 @@
 # toolbag - AI Coding Agent Instructions
 
-Canonical instructions for AI coding agents working in this repository. Tool-specific entrypoints symlink to this file where supported:
-- `CLAUDE.md`
-- `.cursorrules`
-- `.github/copilot-instructions.md`
+`AGENTS.md` is the single source of truth for AI coding agents working in this
+repository. The only compatibility entrypoint is
+`.github/copilot-instructions.md`, for Copilot surfaces that do not read
+`AGENTS.md` natively. Do not add `CLAUDE.md` or `.cursorrules`; Claude Code and
+Cursor read `AGENTS.md`.
 
 ## Project Overview
 
@@ -36,7 +37,11 @@ uv tool run mypy --strict .
 Two shared constructs used across scripts:
 
 - **`SemanticVersion`** — A `NamedTuple` (`major`, `minor`, `patch`) that parses Docker image tags (e.g. `my-image:1.2.3` → `SemanticVersion(1, 2, 3)`). It relies on the tuple ordering inherited from `NamedTuple`, so versions sort and compare directly. Used to identify and compare versioned container images.
-- **`container_runtime()` / `container()`** — `container_runtime()` resolves the container CLI (`$CONTAINER_RUNTIME`, then `podman`, then `docker`); `container()` runs a subprocess through it and returns the completed process. Used by container management scripts.
+- **`container_runtime()` / `container()`** — `container_runtime()` resolves
+  the container CLI from `$CONTAINER_ENGINE`, then Podman, then Docker.
+  `container()` runs a subprocess through it. Every script follows the same
+  order; `clean-old-local-k8s-images` still requires Docker, so hosts with both
+  runtimes must set `CONTAINER_ENGINE=docker`.
 
 ### Script Patterns
 
@@ -51,7 +56,7 @@ Each script follows the same structure:
 |---|---|
 | `clean-old-container-images` | `podman` or `docker` |
 | `clean-old-container-images-from-registry` | `crane` |
-| `clean-old-local-k8s-images` | Docker (Docker Desktop) |
+| `clean-old-local-k8s-images` | Docker Desktop (set `CONTAINER_ENGINE=docker` if Podman is also installed) |
 | `get-temperature` | Linux `/sys/class/thermal/` (Linux only) |
 | `locate-local-ssh` | `nmap` |
 | `start-ec2-instance` | `aws` CLI |
