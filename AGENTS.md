@@ -54,6 +54,7 @@ Each script follows the same structure:
 
 | Script | Requires |
 |---|---|
+| `airpods-meeting` | `bluetoothctl`, `pw-dump`, and `wpctl` (Linux, PipeWire/BlueZ) |
 | `clean-old-container-images` | `podman` or `docker` |
 | `clean-old-container-images-from-registry` | `crane` |
 | `clean-old-local-k8s-images` | Docker Desktop (set `CONTAINER_ENGINE=docker` if Podman is also installed) |
