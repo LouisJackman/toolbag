@@ -16,7 +16,6 @@ not a fix; see the nixos-hosts repository's docs/bluetooth-hfp.md.
 from __future__ import annotations
 
 import argparse
-import atexit
 import json
 import math
 import signal
@@ -24,7 +23,6 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
 from inspect import getdoc
 from sys import modules
 from types import FrameType
@@ -38,7 +36,13 @@ CARD_LOOKUP_ATTEMPTS = 5
 CARD_RETRY_DELAY_SECONDS = 1.0
 ACL_RESET_PAUSE_SECONDS = 1.0
 ACL_RECONNECT_SETTLE_SECONDS = 4.0
-EXPECTED_ERRORS = (OSError, RuntimeError, ValueError, subprocess.SubprocessError)
+
+
+class AirPodsError(Exception):
+    """A device state the user can fix, such as a disconnected headset."""
+
+
+EXPECTED_ERRORS = (AirPodsError, OSError, ValueError, subprocess.SubprocessError)
 
 
 class Profile(NamedTuple):
@@ -48,18 +52,14 @@ class Profile(NamedTuple):
 
 class Card(NamedTuple):
     id: int
-    name: str
-    description: str
     profiles: tuple[Profile, ...]
+    active_profile: str | None
 
 
 PipeWireProps = TypedDict(
     "PipeWireProps",
     {
         "device.name": str,
-        "device.description": str,
-        "device.alias": str,
-        "device.nick": str,
         "media.class": str,
         "node.name": str,
     },
@@ -114,6 +114,10 @@ def objects_with_info(
             yield obj, info
 
 
+def device_key(mac: str) -> str:
+    return mac.replace(":", "_")
+
+
 def find_mac(device_name: str) -> str:
     matches: list[str] = []
     for line in run("bluetoothctl", "devices").stdout.splitlines():
@@ -125,34 +129,30 @@ def find_mac(device_name: str) -> str:
         ):
             matches.append(parts[1])
     if not matches:
-        raise RuntimeError(f"no paired device matching {device_name!r}")
+        raise AirPodsError(f"no paired device matching {device_name!r}")
     if len(matches) > 1:
-        raise RuntimeError(
+        raise AirPodsError(
             f"{len(matches)} paired devices match {device_name!r}; "
             "pass a more specific --device-name"
         )
     return matches[0]
 
 
-def find_card(objects: Sequence[PipeWireObject], device_name: str) -> Card:
+def active_profile_name(params: PipeWireParams) -> str | None:
+    active = params.get("Profile")
+    entries = [active] if isinstance(active, dict) else (active or [])
+    return next((entry["name"] for entry in entries), None)
+
+
+def find_card(objects: Sequence[PipeWireObject], mac: str) -> Card:
+    name = f"bluez_card.{device_key(mac)}"
     for obj, info in objects_with_info(objects):
         props = info.get("props")
-        card_id = obj.get("id")
         params = info.get("params")
-        if props is None or card_id is None or params is None:
+        card_id = obj.get("id")
+        if props is None or params is None or card_id is None:
             continue
-        name = props.get("device.name", "")
-        if not name.startswith("bluez_card."):
-            continue
-        description = " ".join(
-            (
-                props.get("device.description", ""),
-                props.get("device.alias", ""),
-                props.get("device.nick", ""),
-                props.get("device.name", ""),
-            )
-        )
-        if device_name.lower() not in description.lower():
+        if props.get("device.name") != name:
             continue
         profiles = tuple(
             Profile(profile_index=profile["index"], name=profile["name"])
@@ -160,22 +160,14 @@ def find_card(objects: Sequence[PipeWireObject], device_name: str) -> Card:
         )
         return Card(
             id=card_id,
-            name=name,
-            description=description,
             profiles=profiles,
+            active_profile=active_profile_name(params),
         )
-    raise RuntimeError(f"card for {device_name!r} not found; is it connected?")
-
-
-def find_profile(card: Card, prefix: str) -> Profile:
-    for profile in card.profiles:
-        if profile.name.startswith(prefix):
-            return profile
-    raise RuntimeError(f"{card.description} did not offer a {prefix!r} profile")
+    raise AirPodsError(f"card for {mac} not found; is it connected?")
 
 
 def find_source(objects: Sequence[PipeWireObject], mac: str) -> int | None:
-    prefix = "bluez_input." + mac.replace(":", "_")
+    prefix = f"bluez_input.{device_key(mac)}"
     for obj, info in objects_with_info(objects):
         props = info.get("props")
         if props is None or props.get("media.class") != "Audio/Source":
@@ -185,21 +177,11 @@ def find_source(objects: Sequence[PipeWireObject], mac: str) -> int | None:
     return None
 
 
-def current_profile(objects: Sequence[PipeWireObject], card_id: int) -> str | None:
-    for obj, info in objects_with_info(objects):
-        if obj.get("id") != card_id:
-            continue
-        params = info.get("params")
-        if params is None:
-            continue
-        active = params.get("Profile")
-        if isinstance(active, dict):
-            active = [active]
-        for profile in active or []:
-            name = profile.get("name")
-            if name:
-                return name
-    return None
+def require_profile(card: Card, prefix: str) -> Profile:
+    for profile in card.profiles:
+        if profile.name.startswith(prefix):
+            return profile
+    raise AirPodsError(f"card {card.id} did not offer a {prefix!r} profile")
 
 
 def set_profile(card: Card, profile: Profile) -> None:
@@ -218,79 +200,65 @@ def reset_acl(mac: str) -> None:
     time.sleep(ACL_RECONNECT_SETTLE_SECONDS)
 
 
-@dataclass
-class AirPodsSession:
-    # Mutable on purpose: the signal handler and atexit hook share hfp_active.
-    device_name: str = DEFAULT_DEVICE_NAME
-    hfp_active: bool = False
+def wait_for_card(mac: str) -> Card:
+    for _ in range(CARD_LOOKUP_ATTEMPTS - 1):
+        try:
+            return find_card(load_pipewire_objects(), mac)
+        except AirPodsError:
+            time.sleep(CARD_RETRY_DELAY_SECONDS)
+    return find_card(load_pipewire_objects(), mac)
 
-    def wait_for_card(self, attempts: int = CARD_LOOKUP_ATTEMPTS) -> Card:
-        for _ in range(attempts):
-            try:
-                return find_card(load_pipewire_objects(), self.device_name)
-            except RuntimeError:
-                time.sleep(CARD_RETRY_DELAY_SECONDS)
-        raise RuntimeError(
-            f"card for {self.device_name!r} not found; connect the device and try again"
-        )
 
-    def start(self, reconnect: bool) -> None:
-        mac = find_mac(self.device_name)
-        if reconnect:
-            reset_acl(mac)
-        card = self.wait_for_card()
-        hfp = find_profile(card, HFP_PROFILE_PREFIX)
-        set_profile(card, hfp)
-        self.hfp_active = True
+def monitor(mac: str, interval: float) -> None:
+    last_note = ""
+    while True:
+        time.sleep(interval)
+        note = ""
+        try:
+            card = find_card(load_pipewire_objects(), mac)
+            active = card.active_profile
+            if active is None or not active.startswith(HFP_PROFILE_PREFIX):
+                set_profile(card, require_profile(card, HFP_PROFILE_PREFIX))
+                note = (
+                    f"Re-applied HFP because the AirPods reported profile {active!r}."
+                )
+        except (AirPodsError, subprocess.SubprocessError) as exc:
+            note = f"warning: {exc}"
+        if note and note != last_note:
+            print(note, file=sys.stderr)
+        last_note = note
+
+
+def restore_a2dp(mac: str) -> None:
+    try:
+        card = find_card(load_pipewire_objects(), mac)
+        set_profile(card, require_profile(card, A2DP_PROFILE_PREFIX))
+    except EXPECTED_ERRORS as exc:
+        print(f"Could not restore A2DP automatically: {exc}", file=sys.stderr)
+        return
+    print("Restored AirPods to A2DP for music playback.")
+
+
+def hold_hfp(mac: str, reconnect: bool, interval: float) -> None:
+    if reconnect:
+        reset_acl(mac)
+    card = wait_for_card(mac)
+    hfp = require_profile(card, HFP_PROFILE_PREFIX)
+    set_profile(card, hfp)
+    try:
         source = find_source(load_pipewire_objects(), mac)
         if source is not None:
             unmute_source(source)
         print(f"AirPods switched to HFP (profile index {hfp.profile_index}).")
         print("Leave this command running for the meeting.")
         print("Press Ctrl-C when the meeting ends to restore A2DP.")
-
-    def restore_a2dp(self) -> None:
-        if not self.hfp_active:
-            return
-        self.hfp_active = False
-        try:
-            card = find_card(load_pipewire_objects(), self.device_name)
-            a2dp = find_profile(card, A2DP_PROFILE_PREFIX)
-            set_profile(card, a2dp)
-        except EXPECTED_ERRORS as exc:
-            print(f"Could not restore A2DP automatically: {exc}", file=sys.stderr)
-            return
-        print("Restored AirPods to A2DP for music playback.")
-
-    def monitor(self, interval: float) -> None:
-        last_note = ""
-        while True:
-            time.sleep(interval)
-            note = ""
-            try:
-                objects = load_pipewire_objects()
-                card = find_card(objects, self.device_name)
-                current = current_profile(objects, card.id) or "unknown"
-                if not current.startswith(HFP_PROFILE_PREFIX):
-                    set_profile(card, find_profile(card, HFP_PROFILE_PREFIX))
-                    note = (
-                        "Re-applied HFP because the AirPods reported profile "
-                        f"{current!r}."
-                    )
-            except (RuntimeError, subprocess.SubprocessError) as exc:
-                note = f"warning: {exc}"
-            if note and note != last_note:
-                print(note, file=sys.stderr)
-            last_note = note
+        monitor(mac, interval)
+    finally:
+        restore_a2dp(mac)
 
 
-def install_signal_handlers(session: AirPodsSession) -> None:
-    def handle(_signum: int, _frame: FrameType | None) -> None:
-        session.restore_a2dp()
-        raise SystemExit(0)
-
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, handle)
+def _interrupt(_signum: int, _frame: FrameType | None) -> None:
+    raise KeyboardInterrupt
 
 
 def positive_seconds(value: str) -> float:
@@ -321,16 +289,13 @@ def main() -> int:
         help=f"seconds between profile checks (default: {DEFAULT_INTERVAL_SECONDS:g})",
     )
     args = parser.parse_args()
-    device_name: str = args.device_name
-    reconnect: bool = not args.no_reconnect
-    interval: float = args.interval
 
-    session = AirPodsSession(device_name=device_name)
-    install_signal_handlers(session)
-    atexit.register(session.restore_a2dp)
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, _interrupt)
     try:
-        session.start(reconnect=reconnect)
-        session.monitor(interval)
+        hold_hfp(find_mac(args.device_name), not args.no_reconnect, args.interval)
+    except KeyboardInterrupt:
+        return 0
     except EXPECTED_ERRORS as exc:
         print(f"airpods-meeting: {exc}", file=sys.stderr)
         return 1
