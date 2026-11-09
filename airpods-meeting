@@ -18,19 +18,27 @@ from __future__ import annotations
 import argparse
 import atexit
 import json
+import math
 import signal
 import subprocess
 import sys
 import time
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from inspect import getdoc
 from sys import modules
 from types import FrameType
-from typing import NamedTuple, Sequence, TypedDict, cast
+from typing import NamedTuple, TypedDict, cast
 
 HFP_PROFILE_PREFIX = "headset-head-unit"
 A2DP_PROFILE_PREFIX = "a2dp-sink"
 DEFAULT_DEVICE_NAME = "AirPods"
+DEFAULT_INTERVAL_SECONDS = 5.0
+CARD_LOOKUP_ATTEMPTS = 5
+CARD_RETRY_DELAY_SECONDS = 1.0
+ACL_RESET_PAUSE_SECONDS = 1.0
+ACL_RECONNECT_SETTLE_SECONDS = 4.0
+EXPECTED_ERRORS = (OSError, RuntimeError, ValueError, subprocess.SubprocessError)
 
 
 class Profile(NamedTuple):
@@ -84,14 +92,30 @@ def run(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def run_optional(*args: str) -> None:
-    subprocess.run(args, check=False, capture_output=True, text=True)
+    result = subprocess.run(args, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(
+            f"warning: {' '.join(args)} exited {result.returncode}: "
+            f"{result.stderr.strip()}",
+            file=sys.stderr,
+        )
 
 
 def load_pipewire_objects() -> list[PipeWireObject]:
     return cast(list[PipeWireObject], json.loads(run("pw-dump").stdout))
 
 
+def objects_with_info(
+    objects: Sequence[PipeWireObject],
+) -> Iterator[tuple[PipeWireObject, PipeWireInfo]]:
+    for obj in objects:
+        info = obj.get("info")
+        if info is not None:
+            yield obj, info
+
+
 def find_mac(device_name: str) -> str:
+    matches: list[str] = []
     for line in run("bluetoothctl", "devices").stdout.splitlines():
         parts = line.split(maxsplit=2)
         if (
@@ -99,17 +123,23 @@ def find_mac(device_name: str) -> str:
             and parts[0] == "Device"
             and device_name.lower() in parts[2].lower()
         ):
-            return parts[1]
-    raise RuntimeError(f"no paired device matching {device_name!r}")
+            matches.append(parts[1])
+    if not matches:
+        raise RuntimeError(f"no paired device matching {device_name!r}")
+    if len(matches) > 1:
+        raise RuntimeError(
+            f"{len(matches)} paired devices match {device_name!r}; "
+            "pass a more specific --device-name"
+        )
+    return matches[0]
 
 
 def find_card(objects: Sequence[PipeWireObject], device_name: str) -> Card:
-    for obj in objects:
-        info = obj.get("info")
-        if info is None:
-            continue
+    for obj, info in objects_with_info(objects):
         props = info.get("props")
-        if props is None:
+        card_id = obj.get("id")
+        params = info.get("params")
+        if props is None or card_id is None or params is None:
             continue
         name = props.get("device.name", "")
         if not name.startswith("bluez_card."):
@@ -123,12 +153,6 @@ def find_card(objects: Sequence[PipeWireObject], device_name: str) -> Card:
             )
         )
         if device_name.lower() not in description.lower():
-            continue
-        card_id = obj.get("id")
-        if card_id is None:
-            continue
-        params = info.get("params")
-        if params is None:
             continue
         profiles = tuple(
             Profile(profile_index=profile["index"], name=profile["name"])
@@ -152,14 +176,9 @@ def find_profile(card: Card, prefix: str) -> Profile:
 
 def find_source(objects: Sequence[PipeWireObject], mac: str) -> int | None:
     prefix = "bluez_input." + mac.replace(":", "_")
-    for obj in objects:
-        info = obj.get("info")
-        if info is None:
-            continue
+    for obj, info in objects_with_info(objects):
         props = info.get("props")
-        if props is None:
-            continue
-        if props.get("media.class") != "Audio/Source":
+        if props is None or props.get("media.class") != "Audio/Source":
             continue
         if (props.get("node.name") or "").startswith(prefix):
             return obj.get("id")
@@ -167,11 +186,8 @@ def find_source(objects: Sequence[PipeWireObject], mac: str) -> int | None:
 
 
 def current_profile(objects: Sequence[PipeWireObject], card_id: int) -> str | None:
-    for obj in objects:
+    for obj, info in objects_with_info(objects):
         if obj.get("id") != card_id:
-            continue
-        info = obj.get("info")
-        if info is None:
             continue
         params = info.get("params")
         if params is None:
@@ -197,22 +213,23 @@ def unmute_source(source_id: int) -> None:
 def reset_acl(mac: str) -> None:
     print(f"Resetting AirPods ACL ({mac})...")
     run_optional("bluetoothctl", "disconnect", mac)
-    time.sleep(1)
+    time.sleep(ACL_RESET_PAUSE_SECONDS)
     run_optional("bluetoothctl", "connect", mac)
-    time.sleep(4)
+    time.sleep(ACL_RECONNECT_SETTLE_SECONDS)
 
 
 @dataclass
 class AirPodsSession:
+    # Mutable on purpose: the signal handler and atexit hook share hfp_active.
     device_name: str = DEFAULT_DEVICE_NAME
     hfp_active: bool = False
 
-    def wait_for_card(self, attempts: int = 5) -> Card:
+    def wait_for_card(self, attempts: int = CARD_LOOKUP_ATTEMPTS) -> Card:
         for _ in range(attempts):
             try:
                 return find_card(load_pipewire_objects(), self.device_name)
             except RuntimeError:
-                time.sleep(1)
+                time.sleep(CARD_RETRY_DELAY_SECONDS)
         raise RuntimeError(
             f"card for {self.device_name!r} not found; connect the device and try again"
         )
@@ -240,29 +257,31 @@ class AirPodsSession:
             card = find_card(load_pipewire_objects(), self.device_name)
             a2dp = find_profile(card, A2DP_PROFILE_PREFIX)
             set_profile(card, a2dp)
-        except (RuntimeError, subprocess.SubprocessError) as exc:
+        except EXPECTED_ERRORS as exc:
             print(f"Could not restore A2DP automatically: {exc}", file=sys.stderr)
             return
         print("Restored AirPods to A2DP for music playback.")
 
     def monitor(self, interval: float) -> None:
+        last_note = ""
         while True:
             time.sleep(interval)
+            note = ""
             try:
                 objects = load_pipewire_objects()
                 card = find_card(objects, self.device_name)
-            except (RuntimeError, subprocess.SubprocessError):
-                continue
-            current = current_profile(objects, card.id)
-            if current is not None and current.startswith(HFP_PROFILE_PREFIX):
-                continue
-            try:
-                hfp = find_profile(card, HFP_PROFILE_PREFIX)
-                set_profile(card, hfp)
-            except (RuntimeError, subprocess.SubprocessError):
-                continue
-            if current is not None and current.startswith(A2DP_PROFILE_PREFIX):
-                print("Re-applied HFP because the AirPods returned to A2DP.")
+                current = current_profile(objects, card.id) or "unknown"
+                if not current.startswith(HFP_PROFILE_PREFIX):
+                    set_profile(card, find_profile(card, HFP_PROFILE_PREFIX))
+                    note = (
+                        "Re-applied HFP because the AirPods reported profile "
+                        f"{current!r}."
+                    )
+            except (RuntimeError, subprocess.SubprocessError) as exc:
+                note = f"warning: {exc}"
+            if note and note != last_note:
+                print(note, file=sys.stderr)
+            last_note = note
 
 
 def install_signal_handlers(session: AirPodsSession) -> None:
@@ -272,6 +291,15 @@ def install_signal_handlers(session: AirPodsSession) -> None:
 
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, handle)
+
+
+def positive_seconds(value: str) -> float:
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError(
+            f"expected a positive, finite number of seconds, got {value!r}"
+        )
+    return seconds
 
 
 def main() -> int:
@@ -288,16 +316,14 @@ def main() -> int:
     )
     parser.add_argument(
         "--interval",
-        type=float,
-        default=5.0,
-        help="seconds between profile checks (default: 5)",
+        type=positive_seconds,
+        default=DEFAULT_INTERVAL_SECONDS,
+        help=f"seconds between profile checks (default: {DEFAULT_INTERVAL_SECONDS:g})",
     )
     args = parser.parse_args()
-    device_name = str(args.device_name)
-    reconnect = not bool(args.no_reconnect)
-    interval = float(args.interval)
-    if interval <= 0:
-        parser.error("--interval must be positive")
+    device_name: str = args.device_name
+    reconnect: bool = not args.no_reconnect
+    interval: float = args.interval
 
     session = AirPodsSession(device_name=device_name)
     install_signal_handlers(session)
@@ -305,7 +331,7 @@ def main() -> int:
     try:
         session.start(reconnect=reconnect)
         session.monitor(interval)
-    except (RuntimeError, subprocess.SubprocessError) as exc:
+    except EXPECTED_ERRORS as exc:
         print(f"airpods-meeting: {exc}", file=sys.stderr)
         return 1
     return 0
